@@ -306,6 +306,11 @@ class ConversionThread(QThread):
         # Set split pattern based on language and subtitle mode
         self.split_pattern = self._get_split_pattern(lang_code, subtitle_mode)
         self.voice_cache = {}  # Cache for loaded voices
+        # Cache for decoded scene marker sound effects, keyed by normcased
+        # absolute path. A None value means "already tried and already warned",
+        # so a book with hundreds of markers logs one warning, not hundreds.
+        self.sfx_cache = {}
+        self.scene_resolution_table = {}
 
     def _stream_audio_in_chunks(
         self, segments, process_func, progress_prefix="Processing"
@@ -421,12 +426,101 @@ class ConversionThread(QThread):
         return clip, label
 
     def _load_scene_marker_file(self, path, gain_db):
-        """Decode a sound file to 24000 Hz mono float32, with caching.
+        """Decode a sound file to 24000 Hz mono float32 and apply gain.
 
-        Phase 3 placeholder: decoding is not implemented yet, so this always
-        returns None and callers fall back to silence.
+        Decoding goes through the bundled ffmpeg rather than soundfile, because
+        ffmpeg handles m4a/aac and, crucially, resamples. A 48 kHz clip written
+        straight into the 24 kHz stream would play at half speed and report
+        twice its real duration, desyncing every later subtitle.
+
+        Args:
+            path: Absolute path to the sound file
+            gain_db: Gain to apply, in dB
+
+        Returns:
+            float32 mono array at 24000 Hz, or None if the file could not be
+            decoded (callers fall back to silence)
         """
-        return None
+        key = os.path.normcase(os.path.abspath(path))
+
+        if key not in self.sfx_cache:
+            self.sfx_cache[key] = self._decode_scene_marker_file(path)
+
+        cached = self.sfx_cache[key]
+        if cached is None:
+            return None
+
+        if not gain_db:
+            return cached
+
+        # Apply gain to a copy so the cached array stays pristine and the same
+        # file can be reused at a different gain
+        out = cached * (10.0 ** (gain_db / 20.0))
+        if gain_db > 0:
+            # Boosting a hot file otherwise behaves differently per sink:
+            # soundfile stores values above 1.0, ffmpeg's encoder hard-clips
+            self.np.clip(out, -1.0, 1.0, out=out)
+        return out
+
+    def _decode_scene_marker_file(self, path):
+        """Decode one sound file to 24000 Hz mono float32 via ffmpeg.
+
+        Returns None and logs a single warning on any failure.
+        """
+        try:
+            if not os.path.isfile(path):
+                raise RuntimeError("file not found")
+
+            static_ffmpeg.add_paths()
+            cmd = [
+                "ffmpeg",
+                "-v", "error",
+                "-nostdin",          # we read from a file; do not touch our stdin
+                "-i", path,
+                "-map", "0:a:0",     # first audio stream, ignoring embedded cover art
+                "-f", "f32le",
+                "-acodec", "pcm_f32le",
+                "-ac", "1",          # downmix to mono
+                "-ar", "24000",      # resample to the pipeline rate
+                "-t", "300",         # cap runaway input
+                "pipe:1",
+            ]
+
+            # NOTE: deliberately not utils.create_process, which merges stderr
+            # into stdout (corrupting the PCM) and echoes stdout byte by byte.
+            kwargs = {}
+            if platform.system() == "Windows":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                kwargs = {
+                    "startupinfo": startupinfo,
+                    "creationflags": subprocess.CREATE_NO_WINDOW,
+                }
+
+            proc = subprocess.run(cmd, capture_output=True, timeout=60, **kwargs)
+            if proc.returncode != 0:
+                detail = proc.stderr.decode("utf-8", "replace").strip()
+                raise RuntimeError(detail[:200] or "ffmpeg failed")
+
+            raw = proc.stdout
+            remainder = len(raw) % 4
+            if remainder:
+                raw = raw[: len(raw) - remainder]
+            # frombuffer returns a read-only view, so copy before it is used
+            audio = self.np.frombuffer(raw, dtype="float32").copy()
+            if audio.size == 0:
+                raise RuntimeError("no audio decoded")
+
+            return audio
+        except Exception as e:
+            self.log_updated.emit(
+                (
+                    f"  ⚠ Could not read sound file '{os.path.basename(path)}': {e}. Using silence instead.",
+                    "orange",
+                )
+            )
+            return None
 
     def run(self):
         print(
