@@ -44,6 +44,7 @@ from abogen.subtitle_utils import (
     _CHAPTER_MARKER_SEARCH_PATTERN,
     _VOICE_MARKER_PATTERN,
     _VOICE_MARKER_SEARCH_PATTERN,
+    _SCENE_MARKER_PATTERN,
     split_text_by_voice_markers,
     validate_voice_name,
 )
@@ -1815,6 +1816,25 @@ class ConversionThread(QThread):
             self.log_updated.emit(
                 (f"\nFound {len(subtitles)} subtitle entries", "grey")
             )
+
+            # Scene markers are not supported here. This path lays each utterance
+            # at the timestamp given by the input file, so there is no room to
+            # insert extra audio without overwriting the next entry. The markers
+            # are still stripped by clean_subtitle_text, so they are never spoken.
+            # Entries are (start, end, text) tuples, or (time, text) for
+            # timestamped text files - the text is the last element either way.
+            scene_marker_count = sum(
+                len(_SCENE_MARKER_PATTERN.findall(entry[-1] or ""))
+                for entry in subtitles
+                if entry
+            )
+            if scene_marker_count:
+                self.log_updated.emit(
+                    (
+                        f"\n⚠ Scene markers are not supported for subtitle and timestamped input - {scene_marker_count} marker(s) ignored.",
+                        "orange",
+                    )
+                )
 
             # Setup output paths
             base_name = os.path.splitext(os.path.basename(base_path))[0]

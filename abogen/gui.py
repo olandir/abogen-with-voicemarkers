@@ -2348,6 +2348,11 @@ class abogen(QWidget):
             replace_all_caps=self.replace_all_caps,
             replace_numerals=self.replace_numerals,
             fix_nonstandard_punctuation=self.fix_nonstandard_punctuation,
+            scene_markers_enabled=self.scene_markers_enabled,
+            scene_markers_list=self.scene_markers_list,
+            scene_markers_folder=self.scene_markers_folder,
+            scene_markers_padding=self.scene_markers_padding,
+            scene_markers_missing_silence=self.scene_markers_missing_silence,
         )
 
         # Prevent adding duplicate items to the queue
@@ -2475,6 +2480,20 @@ class abogen(QWidget):
                 self.fix_nonstandard_punctuation = getattr(
                     queued_item, "fix_nonstandard_punctuation", False
                 )
+                # Scene marker settings
+                self.scene_markers_enabled = getattr(
+                    queued_item, "scene_markers_enabled", False
+                )
+                self.scene_markers_list = getattr(queued_item, "scene_markers_list", "")
+                self.scene_markers_folder = getattr(
+                    queued_item, "scene_markers_folder", ""
+                )
+                self.scene_markers_padding = getattr(
+                    queued_item, "scene_markers_padding", 0.25
+                )
+                self.scene_markers_missing_silence = getattr(
+                    queued_item, "scene_markers_missing_silence", 1.0
+                )
 
                 # This ensures that if conversion.py (or utils) reads from config/disk 
                 # instead of using passed arguments, it sees the correct queue values.
@@ -2496,6 +2515,14 @@ class abogen(QWidget):
                 self.config[
                     "fix_nonstandard_punctuation"
                 ] = self.fix_nonstandard_punctuation
+                # Scene marker settings
+                self.config["scene_markers_enabled"] = self.scene_markers_enabled
+                self.config["scene_markers_list"] = self.scene_markers_list
+                self.config["scene_markers_folder"] = self.scene_markers_folder
+                self.config["scene_markers_padding"] = self.scene_markers_padding
+                self.config[
+                    "scene_markers_missing_silence"
+                ] = self.scene_markers_missing_silence
 
                 # Sync Voice/Profile in config
                 self.config["selected_voice"] = self.selected_voice

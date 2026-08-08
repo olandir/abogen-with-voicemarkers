@@ -41,6 +41,11 @@ OVERRIDE_FIELDS = [
     "replace_all_caps",
     "replace_numerals",
     "fix_nonstandard_punctuation",
+    "scene_markers_enabled",
+    "scene_markers_list",
+    "scene_markers_folder",
+    "scene_markers_padding",
+    "scene_markers_missing_silence",
 ]
 
 
@@ -494,6 +499,18 @@ class QueueManager(QDialog):
             attrs["replace_numerals"] = getattr(parent, "replace_numerals", False)
             attrs["fix_nonstandard_punctuation"] = getattr(
                 parent, "fix_nonstandard_punctuation", False
+            )
+            # scene markers
+            attrs["scene_markers_enabled"] = getattr(
+                parent, "scene_markers_enabled", False
+            )
+            attrs["scene_markers_list"] = getattr(parent, "scene_markers_list", "")
+            attrs["scene_markers_folder"] = getattr(parent, "scene_markers_folder", "")
+            attrs["scene_markers_padding"] = getattr(
+                parent, "scene_markers_padding", 0.25
+            )
+            attrs["scene_markers_missing_silence"] = getattr(
+                parent, "scene_markers_missing_silence", 1.0
             )
             # book handler options
             attrs["save_chapters_separately"] = getattr(

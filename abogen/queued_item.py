@@ -26,3 +26,9 @@ class QueuedItem:
     replace_all_caps: bool = False
     replace_numerals: bool = False
     fix_nonstandard_punctuation: bool = False
+    # Scene Marker fields
+    scene_markers_enabled: bool = False
+    scene_markers_list: str = ""
+    scene_markers_folder: str = ""
+    scene_markers_padding: float = 0.25
+    scene_markers_missing_silence: float = 1.0

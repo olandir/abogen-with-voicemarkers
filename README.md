@@ -5,7 +5,9 @@
 
 - This fork adds a feature for Voice Markers, allowing you to add markers in the text to have the script automatically switch voices whenever you want to add a little more flexibility to creating audiobooks so that you can have multiple voices easily. There are instructions below on how to do that.
 
-- This fork adds a Word Substitution feature that allows you to preprocess text before audio generation. You can replace words/phrases, convert ALL CAPS to lowercase, convert numerals to words, and fix nonstandard punctuation (like curly quotes) that can interfere with TTS pronunciation. All substitutions preserve chapter markers, voice markers, metadata tags, and timestamps.
+- This fork adds a Word Substitution feature that allows you to preprocess text before audio generation. You can replace words/phrases, convert ALL CAPS to lowercase, convert numerals to words, and fix nonstandard punctuation (like curly quotes) that can interfere with TTS pronunciation. All substitutions preserve chapter markers, voice markers, scene markers, metadata tags, and timestamps.
+
+- This fork adds a feature for Scene Markers, which play a sound effect at a scene break inside a chapter - a passage of time, a change of location, a dream or a memory. Unlike chapter markers they do not create a new chapter, so your audiobook navigation stays clean instead of filling up with one entry per scene. There are instructions below on how to set them up.
 
 - The code was edited using AI (Claude) and although I've tested it and spot checked to make sure it's all accurate, it's AI so the code will not be as clean as if a human wrote it. Use at your own risk. I did update the README in case someone tries to use this fork. but again, the main repo is located [here](https://github.com/denizsafak/abogen). If you have troubles with this one, I recommend you try that as it really is a great audiobook creator. I just added a few features I really wanted for my use case, but they may not even be things you need. So if that's the case, definitely use the main repo.
 
@@ -173,6 +175,7 @@ Here’s Abogen in action: in this demo, it processes ∼3,000 characters of tex
 | **Speed** | Adjust speech rate from `0.1x` to `2.0x` |
 | **Select Voice** | First letter of the language code (e.g., `a` for American English, `b` for British English, etc.), second letter is for `m` for male and `f` for female. |
 | **Word Substitutions** | Enable text preprocessing to replace words, convert ALL CAPS to lowercase, convert numerals to words, and fix nonstandard punctuation. See [Word Substitution](#word-substitution) for more details. |
+| **Scene Markers** | Play a sound effect wherever a `<<SCENE_MARKER:type>>` tag appears inside a chapter, without creating a new chapter. See [About Scene Markers](#about-scene-markers) for more details. |
 | **Voice mixer** | Create custom voices by mixing different voice models with a profile system. See [Voice Mixer](#voice-mixer) for more details. |
 | **Voice preview** | Listen to the selected voice before processing. |
 | **Generate subtitles** | `Disabled`, `Line`, `Sentence`, `Sentence + Comma`, `Sentence + Highlighting`, `1 word`, `2 words`, `3 words`, etc. (Represents the number of words in each subtitle entry) |
@@ -268,7 +271,7 @@ The Word Substitutions Settings dialog provides the following options:
 
 ### Important Notes
 
-- **Marker Preservation**: Word substitutions never affect Chapter Markers (`<<CHAPTER_MARKER:...>>`), Voice Markers (`<<VOICE:...>>`), Metadata Tags (`<<METADATA_...>>`), or timestamps (in `HH:MM:SS` format). These are always preserved exactly as written.
+- **Marker Preservation**: Word substitutions never affect Chapter Markers (`<<CHAPTER_MARKER:...>>`), Voice Markers (`<<VOICE:...>>`), Scene Markers (`<<SCENE_MARKER:...>>`), Metadata Tags (`<<METADATA_...>>`), or timestamps (in `HH:MM:SS` format). These are always preserved exactly as written.
 - **Original Files**: The original text files in your cache remain unchanged. Substitutions are applied in-memory only during audio generation.
 - **Queue Support**: Each item in the queue can have its own word substitution settings. Use the "Override item settings with current selection" checkbox in the Queue Manager to apply the current substitution settings to all queued items.
 - **Processing Order**: Substitutions are applied in this order: (1) Fix nonstandard punctuation, (2) Word substitutions, (3) ALL CAPS conversion, (4) Numeral conversion.
@@ -369,6 +372,58 @@ All 48 Kokoro voices are supported:
 - Male: `zm_yunjian`, `zm_yunxi`, `zm_yunxia`, `zm_yunyang`
 
 For voice samples, see Kokoro's [SAMPLES.md](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/SAMPLES.md).
+
+## `About Scene Markers`
+Scene markers play a sound effect at a specific point **inside** a chapter. They are meant for scene breaks within a chapter - a passage of time, a change of location, a dream, a memory - where you want an audio cue like a clock, a chime or a whoosh.
+
+A scene marker is deliberately different from the other two markers:
+- **It does not create a chapter.** Using a chapter marker for every scene break would fill your audiobook's navigation with "Chapter 1 scene 1, Chapter 1 scene 2, ...". A scene marker leaves the chapter list alone.
+- **It does not change the voice.** Narration continues with whatever voice was speaking before the break.
+
+### How to use scene markers
+Enable **Scene Markers** in the main window, click **Settings**, and map each marker type to a sound file. Then add markers in your text:
+
+```
+<<VOICE:bf_alice>>
+She stared at the clock on the wall.
+
+<<SCENE_MARKER:time>>
+
+Hours had passed - and Alice is still narrating.
+
+<<SCENE_MARKER:dream>>
+
+In the dream there was water, and Alice is still the one describing it.
+```
+
+### Mapping marker types to sound files
+In the Scene Markers settings dialog, add one mapping per line:
+
+```
+time|C:\sfx\clock_tick.wav
+dream|C:\sfx\harp_whoosh.mp3|-6
+location|C:\sfx\chime.wav|-3
+# lines starting with # are ignored
+```
+
+The optional third field is a gain in **decibels**. Stock sound effects are usually much louder than TTS narration, so a negative value like `-6` is often needed to keep the effect from overpowering the voice.
+
+You can also set an optional **SFX folder**. Any marker type not listed in the mapping table is looked up there as `<type>.wav`, `.mp3`, `.flac`, `.ogg` or `.m4a`. An explicit mapping always wins; a mapping that points at a file that does not exist is reported as missing rather than silently falling back to the folder, so typos stay visible.
+
+Click **Validate mappings** to check that every sound file actually exists before running a long conversion.
+
+### Key Features
+- **No chapter pollution**: Scene markers never create a chapter or a navigation entry
+- **Voice continuity**: The current voice carries across the break unchanged
+- **Case-insensitive**: `<<SCENE_MARKER:Time>>` and `<<SCENE_MARKER:time>>` are the same
+- **Per-sound gain**: Add `|-6` to a mapping to quiet a loud effect
+- **Padding**: A configurable silence is added on both sides of every effect so it does not collide with the surrounding narration
+- **Never aborts**: If a sound file is missing or unreadable, a warning is logged and a configurable silence is inserted instead
+- **Any common format**: `.wav`, `.mp3`, `.flac`, `.ogg` and `.m4a` are decoded, downmixed to mono and resampled automatically
+- **GUI support**: Use the "Insert Scene Marker" button to quickly add markers
+
+> [!NOTE]
+> Scene markers are not supported for subtitle input (`.srt`, `.vtt`, `.ass`) or timestamped text files. Those modes place each line at a fixed timestamp taken from the input, so there is no room to insert extra audio. Any markers found are ignored with a warning, and are never read aloud.
 
 ## `About Metadata Tags`
 Similar to chapter markers, it is possible to add metadata tags for `M4B` files. This is useful for audiobook players that support metadata, allowing you to add information like title, author, year, etc. Abogen automatically adds these tags when you process ePUB, PDF or markdown files, but you can also add them manually to your text files. Add metadata tags **at the beginning of your text file** like this:
