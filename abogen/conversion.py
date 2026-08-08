@@ -384,6 +384,50 @@ class ConversionThread(QThread):
         self.voice_cache[voice_name] = loaded_voice
         return loaded_voice
 
+    def _build_scene_marker_audio(self, marker_type):
+        """Build the audio to insert for one <<SCENE_MARKER:type>>.
+
+        Falls back to silence whenever the type cannot be resolved to a usable
+        sound file, so a missing or broken file never aborts the conversion.
+
+        Args:
+            marker_type: Lowercased type from the marker
+
+        Returns:
+            Tuple of (audio, label):
+                - audio: float32 mono array at 24000 Hz, or None if nothing to insert
+                - label: Short description for the log
+        """
+        table = getattr(self, "scene_resolution_table", None) or {}
+        path, gain_db, _source = table.get(marker_type, (None, 0.0, "unmapped"))
+
+        clip = None
+        if path:
+            clip = self._load_scene_marker_file(path, gain_db)
+
+        if clip is None:
+            fallback = float(getattr(self, "scene_markers_missing_silence", 1.0))
+            clip = self.np.zeros(int(fallback * 24000), dtype="float32")
+            label = f"silence, no sound file ({fallback:.1f}s)"
+        else:
+            label = os.path.basename(path)
+
+        padding = float(getattr(self, "scene_markers_padding", 0.25))
+        pad_samples = int(padding * 24000)
+        if pad_samples > 0:
+            silence = self.np.zeros(pad_samples, dtype="float32")
+            clip = self.np.concatenate((silence, clip, silence))
+
+        return clip, label
+
+    def _load_scene_marker_file(self, path, gain_db):
+        """Decode a sound file to 24000 Hz mono float32, with caching.
+
+        Phase 3 placeholder: decoding is not implemented yet, so this always
+        returns None and callers fall back to silence.
+        """
+        return None
+
     def run(self):
         print(
             f"\nVoice: {self.voice}\nLanguage: {self.lang_code}\nSpeed: {self.speed}\nGPU: {self.use_gpu}\nFile: {self.file_name}\nSubtitle mode: {self.subtitle_mode}\nOutput format: {self.output_format}\nSave option: {self.save_option}\n"
@@ -1139,8 +1183,38 @@ class ConversionThread(QThread):
                     # Must come before load_voice_cached, which would fail on the
                     # sentinel voice name.
                     if is_sfx_segment(voice_name):
+                        sfx_audio, sfx_label = self._build_scene_marker_audio(
+                            segment_text
+                        )
+                        if sfx_audio is None or sfx_audio.size == 0:
+                            continue
+
+                        sfx_dur = len(sfx_audio) / rate
+                        sfx_bytes = sfx_audio.astype("float32").tobytes()
+
+                        # Write to every active sink, mirroring the gating used
+                        # for TTS chunks below
+                        if merge_chapters_at_end and merged_out_file:
+                            merged_out_file.write(sfx_audio)
+                        elif merge_chapters_at_end and ffmpeg_proc:
+                            ffmpeg_proc.stdin.write(sfx_bytes)
+                        if chapter_out_file:
+                            chapter_out_file.write(sfx_audio)
+                        elif chapter_ffmpeg_proc:
+                            chapter_ffmpeg_proc.stdin.write(sfx_bytes)
+
+                        # Advance both clocks so every later subtitle timestamp,
+                        # chapter end time and m4b chapter boundary shifts with it
+                        if merge_chapters_at_end:
+                            current_time += sfx_dur
+                        if chapter_out_file or chapter_ffmpeg_proc:
+                            chapter_current_time += sfx_dur
+
                         self.log_updated.emit(
-                            (f"  ♪ Scene marker: {segment_text}", "grey")
+                            (
+                                f"  ♪ Scene marker: {segment_text} - {sfx_label} ({sfx_dur:.2f}s)",
+                                "grey",
+                            )
                         )
                         continue
 
