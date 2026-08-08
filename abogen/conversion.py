@@ -47,6 +47,11 @@ from abogen.subtitle_utils import (
     split_text_by_voice_markers,
     validate_voice_name,
 )
+from abogen.scene_markers import (
+    build_resolution_table,
+    expand_scene_markers,
+    is_sfx_segment,
+)
 
 class CountdownDialog(QDialog):
     """Base dialog with auto-accept countdown functionality"""
@@ -606,9 +611,28 @@ class ConversionThread(QThread):
             total_valid_markers = 0
             total_invalid_markers = 0
 
+            # --- Scene marker settings ---
+            # Scene markers are expanded even when the feature is disabled, so the
+            # marker text never survives into the TTS input and gets read aloud.
+            scene_markers_enabled = getattr(self, "scene_markers_enabled", False)
+            scene_markers_list = getattr(self, "scene_markers_list", "")
+            scene_markers_folder = getattr(self, "scene_markers_folder", "")
+            all_scene_types = []
+
             for chapter_name, chapter_text in chapters:
                 # Use current_voice as the starting voice for this chapter
                 voice_segments, last_voice, valid_count, invalid_count = split_text_by_voice_markers(chapter_text, current_voice)
+
+                # --- Scene marker splitting logic ---
+                # Runs after the voice split so the surrounding voice is carried
+                # onto the text on both sides of the scene break. Note that
+                # last_voice is computed before this, so voice persistence across
+                # chapters is unaffected.
+                voice_segments, scene_types = expand_scene_markers(
+                    voice_segments, enabled=scene_markers_enabled
+                )
+                all_scene_types.extend(scene_types)
+
                 chapters_with_voices.append((chapter_name, voice_segments))
 
                 # Update current_voice so next chapter continues with this voice
@@ -630,6 +654,48 @@ class ConversionThread(QThread):
                     # Some markers were invalid
                     self.log_updated.emit(
                         (f"\nDetected {total_markers} voice marker(s) - {total_valid_markers} valid, {total_invalid_markers} invalid (using previous voice)", "orange")
+                    )
+
+            # Log scene marker information and resolve every distinct type once,
+            # up front, so a file cannot be reported as found here and then be
+            # missing at playback time within the same run.
+            self.scene_resolution_table = {}
+            if all_scene_types:
+                malformed = sum(1 for t in all_scene_types if not t.strip())
+                if scene_markers_enabled:
+                    self.scene_resolution_table = build_resolution_table(
+                        all_scene_types, scene_markers_list, scene_markers_folder
+                    )
+                    self.log_updated.emit(
+                        (f"\nDetected {len(all_scene_types)} scene marker(s):", "grey")
+                    )
+                    for marker_type in sorted(self.scene_resolution_table):
+                        path, gain_db, source = self.scene_resolution_table[marker_type]
+                        if path:
+                            gain_note = f" ({gain_db:+.1f} dB)" if gain_db else ""
+                            self.log_updated.emit(
+                                (f"  {marker_type} -> {path}{gain_note}", "grey")
+                            )
+                        else:
+                            self.log_updated.emit(
+                                (
+                                    f"  ⚠ {marker_type} -> no sound file found ({source}), silence will be used",
+                                    "orange",
+                                )
+                            )
+                else:
+                    self.log_updated.emit(
+                        (
+                            f"\nDetected {len(all_scene_types)} scene marker(s) - scene markers are disabled, markers removed from text",
+                            "grey",
+                        )
+                    )
+                if malformed:
+                    self.log_updated.emit(
+                        (
+                            f"  ⚠ {malformed} malformed scene marker(s) with an empty type were ignored",
+                            "orange",
+                        )
                     )
 
             # Replace chapters with the new structure
@@ -1067,15 +1133,28 @@ class ConversionThread(QThread):
                     chapter_subtitle_file = None
 
                 # Process each voice segment within the chapter
+                last_logged_voice = None
                 for segment_idx, (voice_name, segment_text) in enumerate(voice_segments):
+                    # Scene marker: insert a sound effect instead of running TTS.
+                    # Must come before load_voice_cached, which would fail on the
+                    # sentinel voice name.
+                    if is_sfx_segment(voice_name):
+                        self.log_updated.emit(
+                            (f"  ♪ Scene marker: {segment_text}", "grey")
+                        )
+                        continue
+
                     # Load voice for this segment (with caching)
                     try:
                         loaded_voice = self.load_voice_cached(voice_name, tts)
 
-                        # Log voice change if it's not the first segment
-                        if segment_idx > 0:
+                        # Log voice change. Tracked by value rather than by index
+                        # because scene markers split a single voice run into
+                        # multiple segments that share the same voice.
+                        if last_logged_voice is not None and voice_name != last_logged_voice:
                             voice_display = voice_name if len(voice_name) < 50 else voice_name[:47] + "..."
                             self.log_updated.emit((f"  → Voice: {voice_display}", "grey"))
+                        last_logged_voice = voice_name
                     except Exception as e:
                         # NOTE: If voice loading fails (shouldn't happen since validation in
                         # split_text_by_voice_markers already filtered invalid voices),

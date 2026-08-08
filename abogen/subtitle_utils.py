@@ -17,6 +17,8 @@ _ASS_NEWLINE_LOWER_N_PATTERN = re.compile(r"\\n")
 _CHAPTER_MARKER_SEARCH_PATTERN = re.compile(r"<<CHAPTER_MARKER:(.*?)>>")
 _VOICE_MARKER_PATTERN = re.compile(r"<<VOICE:[^>]*>>")
 _VOICE_MARKER_SEARCH_PATTERN = re.compile(r"<<VOICE:(.*?)>>")
+_SCENE_MARKER_PATTERN = re.compile(r"<<SCENE_MARKER:[^>]*>>")
+_SCENE_MARKER_SEARCH_PATTERN = re.compile(r"<<SCENE_MARKER:(.*?)>>")
 _WEBVTT_HEADER_PATTERN = re.compile(r"^WEBVTT.*?\n", re.MULTILINE)
 _VTT_STYLE_PATTERN = re.compile(r"STYLE\s*\n.*?(?=\n\n|$)", re.DOTALL)
 _VTT_NOTE_PATTERN = re.compile(r"NOTE\s*\n.*?(?=\n\n|$)", re.DOTALL)
@@ -33,18 +35,20 @@ _LINUX_ILLEGAL_CHARS_PATTERN = re.compile(r"[/\x00]")
 
 
 def clean_subtitle_text(text):
-    """Remove chapter markers, voice markers, and metadata tags from subtitle text."""
+    """Remove chapter markers, voice markers, scene markers, and metadata tags from subtitle text."""
     # Use pre-compiled patterns for better performance
     text = _METADATA_TAG_PATTERN.sub("", text)
     text = _CHAPTER_MARKER_PATTERN.sub("", text)
     text = _VOICE_MARKER_PATTERN.sub("", text)
+    text = _SCENE_MARKER_PATTERN.sub("", text)
     return text.strip()
 
 def calculate_text_length(text):
     # Use pre-compiled patterns for better performance
-    # Ignore chapter markers, voice markers, and metadata patterns in a single pass
+    # Ignore chapter markers, voice markers, scene markers, and metadata patterns in a single pass
     text = _CHAPTER_MARKER_PATTERN.sub("", text)
     text = _VOICE_MARKER_PATTERN.sub("", text)
+    text = _SCENE_MARKER_PATTERN.sub("", text)
     text = _METADATA_TAG_PATTERN.sub("", text)
     # Ignore newlines and leading/trailing spaces
     text = text.replace("\n", "").strip()
