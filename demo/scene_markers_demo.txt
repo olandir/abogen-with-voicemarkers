@@ -1,0 +1,39 @@
+<<METADATA_TITLE:Scene Marker Demo>>
+<<METADATA_ARTIST:abogen>>
+
+<<CHAPTER_MARKER:Chapter One - The Waiting Room>>
+
+She stared at the clock on the wall, willing the hands to move faster.
+
+<<SCENE_MARKER:time>>
+
+Three hours later, the same chair, the same silence. Nothing had changed except the light.
+
+<<VOICE:bf_alice>>
+
+Alice took over the telling here, and she should keep telling it after the next break.
+
+<<SCENE_MARKER:dream>>
+
+In the dream there was water, and the water was warm, and Alice was still the one describing it.
+
+<<CHAPTER_MARKER:Chapter Two - Elsewhere>>
+
+The voice carries across the chapter boundary, exactly as voice markers always have.
+
+<<SCENE_MARKER:location>>
+
+A different city. A different room. The same narrator.
+
+<<SCENE_MARKER:unmapped_on_purpose>>
+
+That last marker is deliberately not mapped to any file, so it should log an orange
+warning and fall back to silence rather than stopping the conversion.
+
+<<CHAPTER_MARKER:Chapter Three - The End>>
+
+<<VOICE:am_fenrir>>
+
+A final voice change, to confirm normal voice markers still work alongside scene markers.
+
+The end.

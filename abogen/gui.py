@@ -30,6 +30,8 @@ from PyQt6.QtWidgets import (
     QDialog,
     QCheckBox,
     QMenu,
+    QLineEdit,
+    QDoubleSpinBox,
 )
 from PyQt6.QtGui import QAction, QActionGroup
 from PyQt6.QtCore import (
@@ -670,6 +672,14 @@ class TextboxDialog(QDialog):
         self.insert_voice_btn.clicked.connect(self.insert_voice_marker)
         button_layout.addWidget(self.insert_voice_btn)
 
+        self.insert_scene_btn = QPushButton("Insert Scene Marker", self)
+        self.insert_scene_btn.setToolTip(
+            "Insert a sound effect marker at the cursor position "
+            "(does not create a chapter or change the voice)"
+        )
+        self.insert_scene_btn.clicked.connect(self.insert_scene_marker)
+        button_layout.addWidget(self.insert_scene_btn)
+
         self.cancel_button = QPushButton("Cancel", self)
         self.cancel_button.clicked.connect(self.reject)
 
@@ -677,6 +687,7 @@ class TextboxDialog(QDialog):
         self.ok_button.setDefault(True)
         self.ok_button.clicked.connect(self.handle_ok)
 
+        button_layout.addStretch()
         button_layout.addWidget(self.save_as_button)
         button_layout.addWidget(self.cancel_button)
         button_layout.addWidget(self.ok_button)
@@ -786,6 +797,24 @@ class TextboxDialog(QDialog):
         except:
             default_voice = "af_heart"
         cursor.insertText(f"\n<<VOICE:{default_voice}>>\n")
+        self.text_edit.setTextCursor(cursor)
+        self.update_char_count()
+        self.text_edit.setFocus()
+
+    def insert_scene_marker(self):
+        """Insert a scene marker template at cursor position."""
+        cursor = self.text_edit.textCursor()
+        # Prefill with the first configured marker type, so the inserted marker
+        # resolves to a real sound instead of a placeholder
+        try:
+            from abogen.scene_markers import get_first_marker_type
+
+            parent_window = self.parent()
+            mappings_str = getattr(parent_window, "scene_markers_list", "") or ""
+            default_type = get_first_marker_type(mappings_str) or "type"
+        except Exception:
+            default_type = "type"
+        cursor.insertText(f"\n<<SCENE_MARKER:{default_type}>>\n")
         self.text_edit.setTextCursor(cursor)
         self.update_char_count()
         self.text_edit.setFocus()
@@ -909,6 +938,204 @@ class WordSubstitutionsDialog(QDialog):
         return self.punctuation_checkbox.isChecked()
 
 
+class SceneMarkersDialog(QDialog):
+    """Dialog for configuring scene markers and their sound effect files."""
+
+    def __init__(
+        self,
+        parent=None,
+        initial_list="",
+        initial_folder="",
+        initial_padding=0.25,
+        initial_missing_silence=1.0,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Scene Markers Settings")
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
+        self.resize(700, 620)
+
+        layout = QVBoxLayout(self)
+
+        # Instructions
+        instructions = QLabel(
+            "Insert <<SCENE_MARKER:type>> in your text to play a sound effect at that point.\n"
+            "  - Scene markers play INSIDE a chapter - they never start a new chapter\n"
+            "  - They never change the voice; narration continues with the current voice\n"
+            "  - Map types below (one per line) as: type|path\\to\\sound.wav\n"
+            "  - Optional third field sets gain in dB: type|path\\to\\sound.wav|-6\n"
+            '  - Type names are case-insensitive ("Rain", "rain" and "RAIN" are the same)\n'
+            "  - Lines starting with # are ignored\n"
+            "  - Supported files: .wav, .mp3, .flac, .ogg, .m4a\n"
+            "  - If a type is not listed above, abogen looks for <type>.<ext> in the SFX folder\n"
+            "  - If nothing is found, a warning is logged and silence is inserted instead",
+            self,
+        )
+        instructions.setStyleSheet(
+            "padding: 10px; background-color: #f0f0f0; border-radius: 5px;"
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
+        # Mapping table
+        self.text_edit = QTextEdit(self)
+        self.text_edit.setAcceptRichText(False)
+        self.text_edit.setPlaceholderText(
+            "time|C:\\sfx\\clock.wav\ndream|C:\\sfx\\chimes.mp3|-6"
+        )
+        self.text_edit.setPlainText(initial_list)
+        layout.addWidget(self.text_edit)
+
+        # SFX folder fallback
+        folder_layout = QHBoxLayout()
+        folder_layout.setSpacing(7)
+        folder_layout.addWidget(QLabel("SFX folder (optional):", self))
+        self.folder_edit = QLineEdit(self)
+        self.folder_edit.setPlaceholderText(
+            "Leave empty to use only the mappings above"
+        )
+        self.folder_edit.setText(initial_folder)
+        folder_layout.addWidget(self.folder_edit)
+        self.browse_button = QPushButton("Browse", self)
+        self.browse_button.setFixedSize(80, 36)
+        self.browse_button.clicked.connect(self.browse_folder)
+        folder_layout.addWidget(self.browse_button)
+        layout.addLayout(folder_layout)
+
+        # Timing settings
+        timing_layout = QHBoxLayout()
+        timing_layout.setSpacing(7)
+
+        timing_layout.addWidget(QLabel("Padding before/after each sound:", self))
+        self.padding_spin = QDoubleSpinBox(self)
+        self.padding_spin.setRange(0.0, 10.0)
+        self.padding_spin.setDecimals(2)
+        self.padding_spin.setSingleStep(0.05)
+        self.padding_spin.setSuffix(" s")
+        self.padding_spin.setValue(initial_padding)
+        self.padding_spin.setToolTip(
+            "Silence added on BOTH sides of every sound effect, so it does not "
+            "collide with the surrounding narration."
+        )
+        timing_layout.addWidget(self.padding_spin)
+
+        timing_layout.addStretch()
+
+        timing_layout.addWidget(QLabel("Silence when sound is missing:", self))
+        self.missing_spin = QDoubleSpinBox(self)
+        self.missing_spin.setRange(0.0, 30.0)
+        self.missing_spin.setDecimals(1)
+        self.missing_spin.setSingleStep(0.1)
+        self.missing_spin.setSuffix(" s")
+        self.missing_spin.setValue(initial_missing_silence)
+        self.missing_spin.setToolTip(
+            "Inserted instead of a sound effect when a marker type cannot be "
+            "resolved to a file. Conversion never aborts."
+        )
+        timing_layout.addWidget(self.missing_spin)
+
+        layout.addLayout(timing_layout)
+
+        # Validation output
+        self.validation_summary = QLabel("", self)
+        self.validation_summary.setWordWrap(True)
+        layout.addWidget(self.validation_summary)
+
+        self.validation_output = QTextEdit(self)
+        self.validation_output.setReadOnly(True)
+        self.validation_output.setFixedHeight(120)
+        self.validation_output.setPlaceholderText(
+            'Click "Validate mappings" to check that every sound file exists.'
+        )
+        layout.addWidget(self.validation_output)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.validate_button = QPushButton("Validate mappings", self)
+        self.validate_button.clicked.connect(self.validate_mappings)
+        self.cancel_button = QPushButton("Cancel", self)
+        self.cancel_button.clicked.connect(self.reject)
+        self.ok_button = QPushButton("OK", self)
+        self.ok_button.setDefault(True)
+        self.ok_button.clicked.connect(self.accept)
+
+        button_layout.addWidget(self.validate_button)
+        button_layout.addStretch()
+        button_layout.addWidget(self.cancel_button)
+        button_layout.addWidget(self.ok_button)
+        layout.addLayout(button_layout)
+
+        # Validate on open, so a file deleted since last time shows up immediately
+        self.validate_mappings()
+
+    def browse_folder(self):
+        """Pick the SFX fallback folder."""
+        start_dir = self.folder_edit.text().strip() or ""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Sound Effects Folder", start_dir
+        )
+        if folder:
+            self.folder_edit.setText(folder)
+            self.validate_mappings()
+
+    def validate_mappings(self):
+        """Check that every configured scene marker resolves to a real file.
+
+        Reads the live dialog widgets rather than saved config, so mappings can
+        be fixed and rechecked without closing and reopening the dialog.
+        """
+        from abogen.scene_markers import validate_scene_markers
+
+        rows = validate_scene_markers(
+            self.text_edit.toPlainText(), self.folder_edit.text().strip()
+        )
+
+        if not rows:
+            self.validation_summary.setText("No scene markers configured.")
+            self.validation_summary.setStyleSheet("color: gray;")
+            self.validation_output.setPlainText("")
+            return
+
+        labels = {"ok": "OK      ", "folder": "FOLDER  ", "missing": "MISSING "}
+        width = max(len(row[0]) for row in rows) + 2
+        lines = [
+            f"{labels[status]}{marker_type:<{width}}-> {detail}"
+            for marker_type, status, detail in rows
+        ]
+        self.validation_output.setPlainText("\n".join(lines))
+
+        missing = sum(1 for row in rows if row[1] == "missing")
+        found = len(rows) - missing
+        if missing:
+            self.validation_summary.setText(
+                f"{found} sound file(s) found, {missing} MISSING - missing ones "
+                f"will play {self.missing_spin.value():.1f}s of silence."
+            )
+            self.validation_summary.setStyleSheet("color: #c05000; font-weight: bold;")
+        else:
+            self.validation_summary.setText(f"All {found} sound file(s) found.")
+            self.validation_summary.setStyleSheet("color: #2e7d32; font-weight: bold;")
+
+    def get_mappings_list(self):
+        """Get the scene marker mappings as plain text."""
+        return self.text_edit.toPlainText()
+
+    def get_sfx_folder(self):
+        """Get the optional SFX fallback folder."""
+        return self.folder_edit.text().strip()
+
+    def get_padding(self):
+        """Get the padding silence around each sound effect, in seconds."""
+        return round(self.padding_spin.value(), 2)
+
+    def get_missing_silence(self):
+        """Get the silence inserted when a sound effect is missing, in seconds."""
+        return round(self.missing_spin.value(), 1)
+
+
 class abogen(QWidget):
     def __init__(self):
         super().__init__()
@@ -970,6 +1197,14 @@ class abogen(QWidget):
         self.replace_numerals = self.config.get("replace_numerals", False)
         self.fix_nonstandard_punctuation = self.config.get(
             "fix_nonstandard_punctuation", False
+        )
+        # Scene marker settings
+        self.scene_markers_enabled = self.config.get("scene_markers_enabled", False)
+        self.scene_markers_list = self.config.get("scene_markers_list", "")
+        self.scene_markers_folder = self.config.get("scene_markers_folder", "")
+        self.scene_markers_padding = self.config.get("scene_markers_padding", 0.25)
+        self.scene_markers_missing_silence = self.config.get(
+            "scene_markers_missing_silence", 1.0
         )
         self._pending_close_event = None
         self.gpu_ok = False  # Initialize GPU availability status
@@ -1192,6 +1427,40 @@ class abogen(QWidget):
 
         controls_layout.addLayout(word_sub_layout)
 
+        # Scene Markers section
+        scene_markers_layout = QHBoxLayout()
+        scene_markers_layout.setSpacing(7)
+        scene_markers_label = QLabel("Scene Markers:", self)
+        scene_markers_layout.addWidget(scene_markers_label)
+
+        self.scene_markers_combo = QComboBox(self)
+        self.scene_markers_combo.addItems(["Disabled", "Enabled"])
+        self.scene_markers_combo.setToolTip(
+            "Play a sound effect wherever <<SCENE_MARKER:type>> appears in the text.\n"
+            "Scene markers do not create chapters and do not change the voice."
+        )
+        self.scene_markers_combo.setStyleSheet(
+            "QComboBox { min-height: 20px; padding: 6px 12px; }"
+        )
+        self.scene_markers_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.scene_markers_combo.currentTextChanged.connect(
+            self.on_scene_markers_changed
+        )
+        scene_markers_layout.addWidget(self.scene_markers_combo)
+
+        self.btn_scene_markers_settings = QPushButton("Settings", self)
+        self.btn_scene_markers_settings.setFixedSize(80, 36)
+        self.btn_scene_markers_settings.setStyleSheet(
+            "QPushButton { padding: 6px 12px; }"
+        )
+        self.btn_scene_markers_settings.clicked.connect(self.show_scene_markers_dialog)
+        self.btn_scene_markers_settings.setEnabled(False)  # Initially disabled
+        scene_markers_layout.addWidget(self.btn_scene_markers_settings)
+
+        controls_layout.addLayout(scene_markers_layout)
+
         # Generate subtitles
         subtitle_layout = QHBoxLayout()
         subtitle_layout.setSpacing(7)
@@ -1234,6 +1503,11 @@ class abogen(QWidget):
         # Set initial state for word substitution combo
         self.word_sub_combo.setCurrentText(
             "Enabled" if self.word_substitutions_enabled else "Disabled"
+        )
+
+        # Set initial state for scene markers combo
+        self.scene_markers_combo.setCurrentText(
+            "Enabled" if self.scene_markers_enabled else "Disabled"
         )
 
         # Output voice format
@@ -2074,6 +2348,11 @@ class abogen(QWidget):
             replace_all_caps=self.replace_all_caps,
             replace_numerals=self.replace_numerals,
             fix_nonstandard_punctuation=self.fix_nonstandard_punctuation,
+            scene_markers_enabled=self.scene_markers_enabled,
+            scene_markers_list=self.scene_markers_list,
+            scene_markers_folder=self.scene_markers_folder,
+            scene_markers_padding=self.scene_markers_padding,
+            scene_markers_missing_silence=self.scene_markers_missing_silence,
         )
 
         # Prevent adding duplicate items to the queue
@@ -2201,6 +2480,20 @@ class abogen(QWidget):
                 self.fix_nonstandard_punctuation = getattr(
                     queued_item, "fix_nonstandard_punctuation", False
                 )
+                # Scene marker settings
+                self.scene_markers_enabled = getattr(
+                    queued_item, "scene_markers_enabled", False
+                )
+                self.scene_markers_list = getattr(queued_item, "scene_markers_list", "")
+                self.scene_markers_folder = getattr(
+                    queued_item, "scene_markers_folder", ""
+                )
+                self.scene_markers_padding = getattr(
+                    queued_item, "scene_markers_padding", 0.25
+                )
+                self.scene_markers_missing_silence = getattr(
+                    queued_item, "scene_markers_missing_silence", 1.0
+                )
 
                 # This ensures that if conversion.py (or utils) reads from config/disk 
                 # instead of using passed arguments, it sees the correct queue values.
@@ -2222,6 +2515,14 @@ class abogen(QWidget):
                 self.config[
                     "fix_nonstandard_punctuation"
                 ] = self.fix_nonstandard_punctuation
+                # Scene marker settings
+                self.config["scene_markers_enabled"] = self.scene_markers_enabled
+                self.config["scene_markers_list"] = self.scene_markers_list
+                self.config["scene_markers_folder"] = self.scene_markers_folder
+                self.config["scene_markers_padding"] = self.scene_markers_padding
+                self.config[
+                    "scene_markers_missing_silence"
+                ] = self.scene_markers_missing_silence
 
                 # Sync Voice/Profile in config
                 self.config["selected_voice"] = self.selected_voice
@@ -2392,6 +2693,14 @@ class abogen(QWidget):
             self.conversion_thread.replace_numerals = self.replace_numerals
             self.conversion_thread.fix_nonstandard_punctuation = (
                 self.fix_nonstandard_punctuation
+            )
+            # Pass scene marker settings
+            self.conversion_thread.scene_markers_enabled = self.scene_markers_enabled
+            self.conversion_thread.scene_markers_list = self.scene_markers_list
+            self.conversion_thread.scene_markers_folder = self.scene_markers_folder
+            self.conversion_thread.scene_markers_padding = self.scene_markers_padding
+            self.conversion_thread.scene_markers_missing_silence = (
+                self.scene_markers_missing_silence
             )
             # Pass separate_chapters_format setting
             self.conversion_thread.separate_chapters_format = (
@@ -3178,6 +3487,40 @@ class abogen(QWidget):
             self.config[
                 "fix_nonstandard_punctuation"
             ] = self.fix_nonstandard_punctuation
+            save_config(self.config)
+
+    def on_scene_markers_changed(self, text):
+        """Handle scene markers dropdown change."""
+        self.scene_markers_enabled = text == "Enabled"
+        self.btn_scene_markers_settings.setEnabled(self.scene_markers_enabled)
+
+        # Save to config
+        self.config["scene_markers_enabled"] = self.scene_markers_enabled
+        save_config(self.config)
+
+    def show_scene_markers_dialog(self):
+        """Show scene markers settings dialog."""
+        dialog = SceneMarkersDialog(
+            self,
+            initial_list=self.scene_markers_list,
+            initial_folder=self.scene_markers_folder,
+            initial_padding=self.scene_markers_padding,
+            initial_missing_silence=self.scene_markers_missing_silence,
+        )
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.scene_markers_list = dialog.get_mappings_list()
+            self.scene_markers_folder = dialog.get_sfx_folder()
+            self.scene_markers_padding = dialog.get_padding()
+            self.scene_markers_missing_silence = dialog.get_missing_silence()
+
+            # Save all settings to config
+            self.config["scene_markers_list"] = self.scene_markers_list
+            self.config["scene_markers_folder"] = self.scene_markers_folder
+            self.config["scene_markers_padding"] = self.scene_markers_padding
+            self.config[
+                "scene_markers_missing_silence"
+            ] = self.scene_markers_missing_silence
             save_config(self.config)
 
     def cleanup_conversion_thread(self):

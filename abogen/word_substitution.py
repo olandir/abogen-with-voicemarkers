@@ -7,7 +7,7 @@ This module provides functionality to:
 - Convert numerals to words
 - Fix nonstandard punctuation for TTS compatibility
 
-All substitutions preserve special markers (chapter, voice, metadata, timestamps).
+All substitutions preserve special markers (chapter, voice, scene, metadata, timestamps).
 """
 
 import re
@@ -119,7 +119,7 @@ def split_text_preserving_markers(text):
     """
     # Combined pattern for all markers and timestamps
     marker_pattern = re.compile(
-        r"(<<CHAPTER_MARKER:[^>]*>>|<<VOICE:[^>]*>>|<<METADATA_[^:]+:[^>]*>>|\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,3})?)"
+        r"(<<CHAPTER_MARKER:[^>]*>>|<<VOICE:[^>]*>>|<<SCENE_MARKER:[^>]*>>|<<METADATA_[^:]+:[^>]*>>|\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,3})?)"
     )
 
     segments = []

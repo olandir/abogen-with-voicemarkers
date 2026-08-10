@@ -44,8 +44,14 @@ from abogen.subtitle_utils import (
     _CHAPTER_MARKER_SEARCH_PATTERN,
     _VOICE_MARKER_PATTERN,
     _VOICE_MARKER_SEARCH_PATTERN,
+    _SCENE_MARKER_PATTERN,
     split_text_by_voice_markers,
     validate_voice_name,
+)
+from abogen.scene_markers import (
+    build_resolution_table,
+    expand_scene_markers,
+    is_sfx_segment,
 )
 
 class CountdownDialog(QDialog):
@@ -301,6 +307,11 @@ class ConversionThread(QThread):
         # Set split pattern based on language and subtitle mode
         self.split_pattern = self._get_split_pattern(lang_code, subtitle_mode)
         self.voice_cache = {}  # Cache for loaded voices
+        # Cache for decoded scene marker sound effects, keyed by normcased
+        # absolute path. A None value means "already tried and already warned",
+        # so a book with hundreds of markers logs one warning, not hundreds.
+        self.sfx_cache = {}
+        self.scene_resolution_table = {}
 
     def _stream_audio_in_chunks(
         self, segments, process_func, progress_prefix="Processing"
@@ -378,6 +389,139 @@ class ConversionThread(QThread):
         # Cache it
         self.voice_cache[voice_name] = loaded_voice
         return loaded_voice
+
+    def _build_scene_marker_audio(self, marker_type):
+        """Build the audio to insert for one <<SCENE_MARKER:type>>.
+
+        Falls back to silence whenever the type cannot be resolved to a usable
+        sound file, so a missing or broken file never aborts the conversion.
+
+        Args:
+            marker_type: Lowercased type from the marker
+
+        Returns:
+            Tuple of (audio, label):
+                - audio: float32 mono array at 24000 Hz, or None if nothing to insert
+                - label: Short description for the log
+        """
+        table = getattr(self, "scene_resolution_table", None) or {}
+        path, gain_db, _source = table.get(marker_type, (None, 0.0, "unmapped"))
+
+        clip = None
+        if path:
+            clip = self._load_scene_marker_file(path, gain_db)
+
+        if clip is None:
+            fallback = float(getattr(self, "scene_markers_missing_silence", 1.0))
+            clip = self.np.zeros(int(fallback * 24000), dtype="float32")
+            label = f"silence, no sound file ({fallback:.1f}s)"
+        else:
+            label = os.path.basename(path)
+
+        padding = float(getattr(self, "scene_markers_padding", 0.25))
+        pad_samples = int(padding * 24000)
+        if pad_samples > 0:
+            silence = self.np.zeros(pad_samples, dtype="float32")
+            clip = self.np.concatenate((silence, clip, silence))
+
+        return clip, label
+
+    def _load_scene_marker_file(self, path, gain_db):
+        """Decode a sound file to 24000 Hz mono float32 and apply gain.
+
+        Decoding goes through the bundled ffmpeg rather than soundfile, because
+        ffmpeg handles m4a/aac and, crucially, resamples. A 48 kHz clip written
+        straight into the 24 kHz stream would play at half speed and report
+        twice its real duration, desyncing every later subtitle.
+
+        Args:
+            path: Absolute path to the sound file
+            gain_db: Gain to apply, in dB
+
+        Returns:
+            float32 mono array at 24000 Hz, or None if the file could not be
+            decoded (callers fall back to silence)
+        """
+        key = os.path.normcase(os.path.abspath(path))
+
+        if key not in self.sfx_cache:
+            self.sfx_cache[key] = self._decode_scene_marker_file(path)
+
+        cached = self.sfx_cache[key]
+        if cached is None:
+            return None
+
+        if not gain_db:
+            return cached
+
+        # Apply gain to a copy so the cached array stays pristine and the same
+        # file can be reused at a different gain
+        out = cached * (10.0 ** (gain_db / 20.0))
+        if gain_db > 0:
+            # Boosting a hot file otherwise behaves differently per sink:
+            # soundfile stores values above 1.0, ffmpeg's encoder hard-clips
+            self.np.clip(out, -1.0, 1.0, out=out)
+        return out
+
+    def _decode_scene_marker_file(self, path):
+        """Decode one sound file to 24000 Hz mono float32 via ffmpeg.
+
+        Returns None and logs a single warning on any failure.
+        """
+        try:
+            if not os.path.isfile(path):
+                raise RuntimeError("file not found")
+
+            static_ffmpeg.add_paths()
+            cmd = [
+                "ffmpeg",
+                "-v", "error",
+                "-nostdin",          # we read from a file; do not touch our stdin
+                "-i", path,
+                "-map", "0:a:0",     # first audio stream, ignoring embedded cover art
+                "-f", "f32le",
+                "-acodec", "pcm_f32le",
+                "-ac", "1",          # downmix to mono
+                "-ar", "24000",      # resample to the pipeline rate
+                "-t", "300",         # cap runaway input
+                "pipe:1",
+            ]
+
+            # NOTE: deliberately not utils.create_process, which merges stderr
+            # into stdout (corrupting the PCM) and echoes stdout byte by byte.
+            kwargs = {}
+            if platform.system() == "Windows":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                kwargs = {
+                    "startupinfo": startupinfo,
+                    "creationflags": subprocess.CREATE_NO_WINDOW,
+                }
+
+            proc = subprocess.run(cmd, capture_output=True, timeout=60, **kwargs)
+            if proc.returncode != 0:
+                detail = proc.stderr.decode("utf-8", "replace").strip()
+                raise RuntimeError(detail[:200] or "ffmpeg failed")
+
+            raw = proc.stdout
+            remainder = len(raw) % 4
+            if remainder:
+                raw = raw[: len(raw) - remainder]
+            # frombuffer returns a read-only view, so copy before it is used
+            audio = self.np.frombuffer(raw, dtype="float32").copy()
+            if audio.size == 0:
+                raise RuntimeError("no audio decoded")
+
+            return audio
+        except Exception as e:
+            self.log_updated.emit(
+                (
+                    f"  ⚠ Could not read sound file '{os.path.basename(path)}': {e}. Using silence instead.",
+                    "orange",
+                )
+            )
+            return None
 
     def run(self):
         print(
@@ -606,9 +750,28 @@ class ConversionThread(QThread):
             total_valid_markers = 0
             total_invalid_markers = 0
 
+            # --- Scene marker settings ---
+            # Scene markers are expanded even when the feature is disabled, so the
+            # marker text never survives into the TTS input and gets read aloud.
+            scene_markers_enabled = getattr(self, "scene_markers_enabled", False)
+            scene_markers_list = getattr(self, "scene_markers_list", "")
+            scene_markers_folder = getattr(self, "scene_markers_folder", "")
+            all_scene_types = []
+
             for chapter_name, chapter_text in chapters:
                 # Use current_voice as the starting voice for this chapter
                 voice_segments, last_voice, valid_count, invalid_count = split_text_by_voice_markers(chapter_text, current_voice)
+
+                # --- Scene marker splitting logic ---
+                # Runs after the voice split so the surrounding voice is carried
+                # onto the text on both sides of the scene break. Note that
+                # last_voice is computed before this, so voice persistence across
+                # chapters is unaffected.
+                voice_segments, scene_types = expand_scene_markers(
+                    voice_segments, enabled=scene_markers_enabled
+                )
+                all_scene_types.extend(scene_types)
+
                 chapters_with_voices.append((chapter_name, voice_segments))
 
                 # Update current_voice so next chapter continues with this voice
@@ -630,6 +793,48 @@ class ConversionThread(QThread):
                     # Some markers were invalid
                     self.log_updated.emit(
                         (f"\nDetected {total_markers} voice marker(s) - {total_valid_markers} valid, {total_invalid_markers} invalid (using previous voice)", "orange")
+                    )
+
+            # Log scene marker information and resolve every distinct type once,
+            # up front, so a file cannot be reported as found here and then be
+            # missing at playback time within the same run.
+            self.scene_resolution_table = {}
+            if all_scene_types:
+                malformed = sum(1 for t in all_scene_types if not t.strip())
+                if scene_markers_enabled:
+                    self.scene_resolution_table = build_resolution_table(
+                        all_scene_types, scene_markers_list, scene_markers_folder
+                    )
+                    self.log_updated.emit(
+                        (f"\nDetected {len(all_scene_types)} scene marker(s):", "grey")
+                    )
+                    for marker_type in sorted(self.scene_resolution_table):
+                        path, gain_db, source = self.scene_resolution_table[marker_type]
+                        if path:
+                            gain_note = f" ({gain_db:+.1f} dB)" if gain_db else ""
+                            self.log_updated.emit(
+                                (f"  {marker_type} -> {path}{gain_note}", "grey")
+                            )
+                        else:
+                            self.log_updated.emit(
+                                (
+                                    f"  ⚠ {marker_type} -> no sound file found ({source}), silence will be used",
+                                    "orange",
+                                )
+                            )
+                else:
+                    self.log_updated.emit(
+                        (
+                            f"\nDetected {len(all_scene_types)} scene marker(s) - scene markers are disabled, markers removed from text",
+                            "grey",
+                        )
+                    )
+                if malformed:
+                    self.log_updated.emit(
+                        (
+                            f"  ⚠ {malformed} malformed scene marker(s) with an empty type were ignored",
+                            "orange",
+                        )
                     )
 
             # Replace chapters with the new structure
@@ -1067,15 +1272,58 @@ class ConversionThread(QThread):
                     chapter_subtitle_file = None
 
                 # Process each voice segment within the chapter
+                last_logged_voice = None
                 for segment_idx, (voice_name, segment_text) in enumerate(voice_segments):
+                    # Scene marker: insert a sound effect instead of running TTS.
+                    # Must come before load_voice_cached, which would fail on the
+                    # sentinel voice name.
+                    if is_sfx_segment(voice_name):
+                        sfx_audio, sfx_label = self._build_scene_marker_audio(
+                            segment_text
+                        )
+                        if sfx_audio is None or sfx_audio.size == 0:
+                            continue
+
+                        sfx_dur = len(sfx_audio) / rate
+                        sfx_bytes = sfx_audio.astype("float32").tobytes()
+
+                        # Write to every active sink, mirroring the gating used
+                        # for TTS chunks below
+                        if merge_chapters_at_end and merged_out_file:
+                            merged_out_file.write(sfx_audio)
+                        elif merge_chapters_at_end and ffmpeg_proc:
+                            ffmpeg_proc.stdin.write(sfx_bytes)
+                        if chapter_out_file:
+                            chapter_out_file.write(sfx_audio)
+                        elif chapter_ffmpeg_proc:
+                            chapter_ffmpeg_proc.stdin.write(sfx_bytes)
+
+                        # Advance both clocks so every later subtitle timestamp,
+                        # chapter end time and m4b chapter boundary shifts with it
+                        if merge_chapters_at_end:
+                            current_time += sfx_dur
+                        if chapter_out_file or chapter_ffmpeg_proc:
+                            chapter_current_time += sfx_dur
+
+                        self.log_updated.emit(
+                            (
+                                f"  ♪ Scene marker: {segment_text} - {sfx_label} ({sfx_dur:.2f}s)",
+                                "grey",
+                            )
+                        )
+                        continue
+
                     # Load voice for this segment (with caching)
                     try:
                         loaded_voice = self.load_voice_cached(voice_name, tts)
 
-                        # Log voice change if it's not the first segment
-                        if segment_idx > 0:
+                        # Log voice change. Tracked by value rather than by index
+                        # because scene markers split a single voice run into
+                        # multiple segments that share the same voice.
+                        if last_logged_voice is not None and voice_name != last_logged_voice:
                             voice_display = voice_name if len(voice_name) < 50 else voice_name[:47] + "..."
                             self.log_updated.emit((f"  → Voice: {voice_display}", "grey"))
+                        last_logged_voice = voice_name
                     except Exception as e:
                         # NOTE: If voice loading fails (shouldn't happen since validation in
                         # split_text_by_voice_markers already filtered invalid voices),
@@ -1568,6 +1816,25 @@ class ConversionThread(QThread):
             self.log_updated.emit(
                 (f"\nFound {len(subtitles)} subtitle entries", "grey")
             )
+
+            # Scene markers are not supported here. This path lays each utterance
+            # at the timestamp given by the input file, so there is no room to
+            # insert extra audio without overwriting the next entry. The markers
+            # are still stripped by clean_subtitle_text, so they are never spoken.
+            # Entries are (start, end, text) tuples, or (time, text) for
+            # timestamped text files - the text is the last element either way.
+            scene_marker_count = sum(
+                len(_SCENE_MARKER_PATTERN.findall(entry[-1] or ""))
+                for entry in subtitles
+                if entry
+            )
+            if scene_marker_count:
+                self.log_updated.emit(
+                    (
+                        f"\n⚠ Scene markers are not supported for subtitle and timestamped input - {scene_marker_count} marker(s) ignored.",
+                        "orange",
+                    )
+                )
 
             # Setup output paths
             base_name = os.path.splitext(os.path.basename(base_path))[0]
